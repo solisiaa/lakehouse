@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+airflow-logs/
+logs/
+warehouse/
+dbt_project/target/
+dbt_project/logs/
+dbt_project/dbt_packages/
+.ipynb_checkpoints/
+.DS_Store
+postgres-data/
+minio-data/

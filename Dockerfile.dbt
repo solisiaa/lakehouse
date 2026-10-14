@@ -1,0 +1,17 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DBT_PROFILES_DIR=/usr/app/dbt
+
+WORKDIR /usr/app/dbt
+
+RUN apt-get update && apt-get install -y --no-install-recommends git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY dbt_project/requirements-dbt.txt /tmp/requirements-dbt.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-dbt.txt
+
+COPY dbt_project /usr/app/dbt
+
+CMD ["tail", "-f", "/dev/null"]

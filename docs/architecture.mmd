@@ -1,0 +1,44 @@
+flowchart LR
+    subgraph SRC["Источники"]
+        API1["Open-Meteo API<br/>(погода)"]
+        API2["Exchange Rates API<br/>(валюты)"]
+        CSV["Локальные CSV<br/>data/raw/*.csv"]
+    end
+    subgraph ORCH["Оркестрация"]
+        AF["Apache Airflow<br/>DAG ingest_bronze<br/>@daily + mock-режим"]
+    end
+    subgraph BRONZE["Bronze — MinIO S3"]
+        B["s3://lakehouse/bronze/<br/>weather / rates / local<br/>+ ingested_at, source"]
+    end
+    subgraph SILVER["Silver — Iceberg + Parquet"]
+        SP["PySpark<br/>bronze_to_silver.py<br/>cast / dedup / MERGE"]
+        IC1["rest.silver.weather_daily<br/>PARTITIONED BY days(day)"]
+        IC2["rest.silver.exchange_rates<br/>PARTITIONED BY days(day)"]
+        REST[("Iceberg REST catalog<br/>+ Postgres JDBC backend")]
+    end
+    subgraph GOLD["Gold — Trino + dbt"]
+        TR[("Trino<br/>catalog: iceberg")]
+        STG["dbt staging<br/>stg_weather / stg_rates"]
+        MARTS["dbt marts<br/>fact_weather / fact_rates<br/>dim_currency / mart_daily_summary"]
+    end
+    subgraph BI["Потребление"]
+        NB["notebooks/iceberg_demo.ipynb<br/>schema evolution / time travel / MERGE"]
+        DOCS["dbt docs<br/>lineage + tests"]
+        MB["Metabase (profile bi)<br/>дашборд"]
+    end
+    API1 --> AF
+    API2 --> AF
+    CSV --> AF
+    AF -->|boto3 put_object<br/>JSON как есть| B
+    B -->|s3a:// read| SP
+    SP -->|MERGE INTO<br/>атомарно| IC1
+    SP -->|MERGE INTO<br/>атомарно| IC2
+    IC1 -.->|метаданные| REST
+    IC2 -.->|метаданные| REST
+    IC1 --> TR
+    IC2 --> TR
+    TR --> STG
+    STG --> MARTS
+    MARTS --> NB
+    MARTS --> DOCS
+    MARTS --> MB

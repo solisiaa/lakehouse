@@ -1,0 +1,25 @@
+version: 2
+
+sources:
+  - name: silver
+    database: iceberg
+    schema: silver
+    tables:
+      - name: weather_daily
+        description: Очищенные дневные агрегаты погоды (Silver, Iceberg).
+        columns:
+          - name: day
+            description: Дата наблюдения
+          - name: city
+            description: Город
+      - name: exchange_rates
+        description: Очищенные курсы валют (Silver, Iceberg).
+        columns:
+          - name: day
+            description: Дата курса
+          - name: base
+            description: Базовая валюта
+          - name: currency
+            description: Валюта котировки
+          - name: rate
+            description: Курс

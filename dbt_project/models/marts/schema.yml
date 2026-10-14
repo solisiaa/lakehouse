@@ -1,0 +1,48 @@
+version: 2
+
+models:
+  - name: stg_weather
+    description: Staging погоды из silver.weather_daily
+    columns:
+      - name: day
+        tests: [not_null]
+      - name: city
+        tests: [not_null]
+      - name: avg_temp_c
+        tests: [not_null]
+  - name: stg_rates
+    description: Staging курсов из silver.exchange_rates
+    columns:
+      - name: day
+        tests: [not_null]
+      - name: base
+        tests: [not_null]
+      - name: currency
+        tests: [not_null]
+      - name: rate
+        tests: [not_null]
+  - name: fact_weather
+    description: Gold-витрина погоды
+    columns:
+      - name: day
+        tests: [not_null]
+      - name: city
+        tests: [not_null]
+      - name: avg_temp_c
+        tests: [not_null]
+  - name: fact_rates
+    description: Gold-витрина курсов (incremental)
+    columns:
+      - name: day_base_currency
+        tests: [unique, not_null]
+      - name: rate
+        tests: [not_null]
+  - name: dim_currency
+    columns:
+      - name: currency_code
+        tests: [unique, not_null]
+  - name: mart_daily_summary
+    description: Демо-витрина для дашборда
+    columns:
+      - name: day
+        tests: [not_null]

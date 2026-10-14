@@ -1,0 +1,313 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: '46BKJoQ5EOXBEP5ojA6asn9W8qT3LSq5itoJwCXppx9s='
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: 'false'
+    S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+    S3_REGION: ${S3_REGION:-us-east-1}
+    AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+    AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+    MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    LAKEHOUSE_BUCKET: ${LAKEHOUSE_BUCKET:-lakehouse}
+    WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET:-warehouse}
+    MOCK_MODE: ${MOCK_MODE:-true}
+    OPEN_METEO_LAT: ${OPEN_METEO_LAT:-55.75}
+    OPEN_METEO_LON: ${OPEN_METEO_LON:-37.61}
+    EXCHANGE_API_URL: ${EXCHANGE_API_URL:-https://open.er-api.com/v6/latest/USD}
+    ICEBERG_REST_URI: http://iceberg-rest:8181
+    SPARK_MASTER_URL: spark://spark-master:7077
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./spark_jobs:/opt/airflow/spark_jobs
+    - ./data:/opt/airflow/data
+    - ./scripts:/opt/airflow/scripts
+    - ./dbt_project:/opt/airflow/dbt_project
+    - ./notebooks:/opt/airflow/notebooks
+    - airflow-logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: lakehouse-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-airflow} -d ${POSTGRES_DB:-airflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - lakehouse-net
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: lakehouse-minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      lakehouse-net:
+        aliases:
+          - warehouse.minio
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: lakehouse-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      LAKEHOUSE_BUCKET: ${LAKEHOUSE_BUCKET:-lakehouse}
+      WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET:-warehouse}
+    entrypoint: >
+      /bin/sh -c "
+      until /usr/bin/mc alias set minio http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do echo 'waiting for minio...' && sleep 2; done;
+      /usr/bin/mc mb -p minio/$${LAKEHOUSE_BUCKET} || true;
+      /usr/bin/mc mb -p minio/$${WAREHOUSE_BUCKET} || true;
+      /usr/bin/mc anonymous set public minio/$${WAREHOUSE_BUCKET} || true;
+      echo 'buckets ready';
+      "
+    networks:
+      - lakehouse-net
+    restart: "no"
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.5.0
+    container_name: lakehouse-iceberg-rest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "${ICEBERG_REST_PORT:-8181}:8181"
+    environment:
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadmin123}
+      - AWS_REGION=${S3_REGION:-us-east-1}
+      - CATALOG_WAREHOUSE=${ICEBERG_S3_WAREHOUSE:-s3://warehouse/wh/}
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=${S3_ENDPOINT:-http://minio:9000}
+      - CATALOG_S3_PATH_STYLE_ACCESS=true
+      - CATALOG_URI=jdbc:postgresql://postgres:5432/${ICEBERG_CATALOG_DB:-iceberg_catalog}
+      - CATALOG_JDBC_USER=${POSTGRES_USER:-airflow}
+      - CATALOG_JDBC_PASSWORD=${POSTGRES_PASSWORD:-airflow}
+    networks:
+      - lakehouse-net
+    restart: unless-stopped
+
+  spark-master:
+    image: tabulario/spark-iceberg:3.5.1_1.5.0
+    container_name: lakehouse-spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host spark-master --port 7077 --webui-port 8080
+    depends_on:
+      iceberg-rest:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    environment:
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadmin123}
+      - AWS_REGION=${S3_REGION:-us-east-1}
+    volumes:
+      - ./spark_jobs:/home/iceberg/spark_jobs:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - ./data:/home/iceberg/data
+    ports:
+      - "${SPARK_MASTER_PORT:-7077}:7077"
+      - "${SPARK_MASTER_UI_PORT:-8085}:8080"
+    networks:
+      - lakehouse-net
+    restart: unless-stopped
+
+  spark-worker:
+    image: tabulario/spark-iceberg:3.5.1_1.5.0
+    container_name: lakehouse-spark-worker
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077 --cores 2 --memory 2g
+    depends_on:
+      - spark-master
+    environment:
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadmin123}
+      - AWS_REGION=${S3_REGION:-us-east-1}
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2g
+    volumes:
+      - ./spark_jobs:/home/iceberg/spark_jobs:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - ./data:/home/iceberg/data
+    networks:
+      - lakehouse-net
+    restart: unless-stopped
+
+  trino:
+    image: trinodb/trino:445
+    container_name: lakehouse-trino
+    depends_on:
+      iceberg-rest:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./trino/etc:/etc/trino:ro
+    environment:
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadmin123}
+      - AWS_REGION=${S3_REGION:-us-east-1}
+    ports:
+      - "${TRINO_PORT:-8082}:8080"
+    networks:
+      - lakehouse-net
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: lakehouse-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins
+        airflow db migrate
+        airflow users create --username $${_AIRFLOW_WWW_USER_USERNAME:-airflow} --password $${_AIRFLOW_WWW_USER_PASSWORD:-airflow} --firstname Admin --lastname User --role Admin --email admin@example.com || true
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+    user: "0:0"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./spark_jobs:/opt/airflow/spark_jobs
+      - ./data:/opt/airflow/data
+      - ./scripts:/opt/airflow/scripts
+      - ./dbt_project:/opt/airflow/dbt_project
+      - ./notebooks:/opt/airflow/notebooks
+      - airflow-logs:/opt/airflow/logs
+    networks:
+      - lakehouse-net
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: lakehouse-airflow-webserver
+    command: webserver
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - lakehouse-net
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: lakehouse-airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $$(hostname)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - lakehouse-net
+    restart: unless-stopped
+
+  dbt:
+    build:
+      context: .
+      dockerfile: Dockerfile.dbt
+    container_name: lakehouse-dbt
+    depends_on:
+      - trino
+    environment:
+      - TRINO_HOST=trino
+      - TRINO_PORT=8080
+      - TRINO_USER=admin
+      - TRINO_CATALOG=iceberg
+      - TRINO_SCHEMA=gold
+    volumes:
+      - ./dbt_project:/usr/app/dbt
+      - ./data:/usr/app/data
+    working_dir: /usr/app/dbt
+    ports:
+      - "8081:8081"
+    command: tail -f /dev/null
+    networks:
+      - lakehouse-net
+    restart: unless-stopped
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: lakehouse-metabase
+    depends_on:
+      - trino
+    ports:
+      - "3000:3000"
+    environment:
+      - MB_DB_TYPE=postgres
+      - MB_DB_DBNAME=${POSTGRES_DB:-airflow}
+      - MB_DB_PORT=5432
+      - MB_DB_USER=${POSTGRES_USER:-airflow}
+      - MB_DB_PASS=${POSTGRES_PASSWORD:-airflow}
+      - MB_DB_HOST=postgres
+    volumes:
+      - metabase-data:/metabase-data
+    networks:
+      - lakehouse-net
+    profiles:
+      - bi
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  minio-data:
+  airflow-logs:
+  metabase-data:
+
+networks:
+  lakehouse-net:
+    driver: bridge
