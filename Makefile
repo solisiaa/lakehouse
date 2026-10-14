@@ -53,3 +53,7 @@ trino-cli: ## Открыть trino CLI
 
 lint-py: ## Быстрая проверка синтаксиса python
 	python3 -m py_compile dags/ingest_bronze.py spark_jobs/bronze_to_silver.py spark_jobs/iceberg_maintenance.py scripts/register_iceberg_tables.py && echo OK
+
+test: ## Python-тесты (pytest, без Docker)
+	python3 -m pip install -q -r tests/requirements-test.txt
+	python3 -m pytest tests -v

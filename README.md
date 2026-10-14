@@ -267,6 +267,8 @@ lakehouse-platform/
 │   ├── models/staging/ (sources.yml, stg_weather.sql, stg_rates.sql)
 │   ├── models/marts/ (fact_weather.sql, fact_rates.sql, dim_currency.sql, mart_daily_summary.sql, schema.yml)
 │   └── tests/ (assert_positive_rates.sql, assert_reasonable_temp.sql)
+├── tests/ (pytest: test_bronze_logic.py, test_silver_gold_static.py, test_repo_structure.py)
+│   ├── conftest.py, pytest.ini, requirements-test.txt
 ├── data/raw/ (weather_sample.csv, rates_sample.csv)
 ├── scripts/
 │   ├── init_minio.sh
@@ -281,7 +283,29 @@ lakehouse-platform/
 
 ---
 
-## 6. Конфигурация
+## 6. Тесты
+
+Да, есть два уровня:
+
+**Python (pytest, без Docker) — 17 тестов:**
+```bash
+make test
+# или: python3 -m pytest tests -v
+```
+- `tests/test_bronze_logic.py` (7) — mock-генераторы погоды/курсов, детерминизм, fallback API при офлайне, запись JSON в S3-стаб, валидность `data/raw/*.csv`. DAG импортируется через стабы Airflow/boto3 из `tests/conftest.py`.
+- `tests/test_silver_gold_static.py` (6) — в `bronze_to_silver.py` есть `MERGE INTO`, `PARTITIONED BY (days(day))`, REST-каталог + S3; в `iceberg_maintenance.py` — `expire_snapshots`/`rewrite_data_files`; Trino-каталог смотрит на REST+MinIO; все dbt `ref()` разрешаются, тесты `unique/not_null` на месте.
+- `tests/test_repo_structure.py` (4) — все файлы по ТЗ на месте, в compose все 10 сервисов, Airflow на `LocalExecutor`, README покрывает Iceberg-раздел.
+
+**dbt (внутри платформы):**
+```bash
+make dbt-run   # dbt run + dbt test
+```
+- Схема-тесты: `unique`, `not_null` (`dbt_project/models/marts/schema.yml`).
+- Сингулярные: `assert_positive_rates.sql`, `assert_reasonable_temp.sql`.
+
+---
+
+## 7. Конфигурация
 
 Всё через `.env` (см. `.env.example`): `POSTGRES_*`, `MINIO_*`, `ICEBERG_*`, `SPARK_*`, `TRINO_PORT`, `AIRFLOW_*`, `S3_ENDPOINT`, `MOCK_MODE`.
 
@@ -291,7 +315,7 @@ lakehouse-platform/
 
 ---
 
-## 7. Ограничения и дальнейшее развитие
+## 8. Ограничения и дальнейшее развитие
 
 - **REST-каталог без авторизации** (демо). Дальше: SigV4/OAuth + Nessie/Polaris для веток таблиц.
 - **Один нод Spark / один Trino-координатор** — для прод: Spark on K8s, Trino-кластер (coordinator + workers).
@@ -303,7 +327,7 @@ lakehouse-platform/
 
 ---
 
-## 8. Критерии готовности (чеклист)
+## 9. Критерии готовности (чеклист)
 
 - [x] `docker compose up -d` поднимает платформу без ручных правок.
 - [x] Airflow DAG `ingest_bronze` выполняется и наполняет `s3://lakehouse/bronze/`.
